@@ -5,3 +5,4 @@ lyricsgenius
 yt-dlp
 librosa
 firebase-admin
+essentia

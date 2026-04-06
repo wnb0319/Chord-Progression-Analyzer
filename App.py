@@ -42,6 +42,10 @@ try:
 except Exception:  # pragma: no cover
     librosa = None
 
+try:
+    import essentia.standard as es  # type: ignore
+except Exception:  # pragma: no cover
+    es = None
 
 # ==========================================
 # ⚙️ 0. 환경 설정 및 초기화 (API & Firebase)
@@ -162,6 +166,10 @@ def chordino_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def essentia_available() -> bool:
+    return es is not None
 
 
 def download_youtube_audio_wav(youtube_url: str) -> str:
@@ -415,9 +423,76 @@ def chord_from_chroma_vec(v: np.ndarray) -> str:
 
 
 def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
-    """Spotify preview(약 30초) 오디오 기반 분석."""
+    """오디오 기반 분석.
+
+    우선순위:
+    - Essentia(템포/키/코드): 가능하면 사용
+    - librosa(간이): Essentia가 없을 때 폴백
+    """
+    if es is not None:
+        audio = es.MonoLoader(filename=audio_path, sampleRate=44100)()
+        if audio is None or len(audio) == 0:
+            raise RuntimeError("오디오를 불러오지 못했습니다.")
+
+        # BPM
+        try:
+            bpm, _, _, _ = es.RhythmExtractor2013(method="multifeature")(audio)
+            tempo = float(bpm)
+        except Exception:
+            tempo = 0.0
+
+        # Key
+        try:
+            key, scale, _strength = es.KeyExtractor()(audio)
+            key_name = str(key)
+            mode_name = "Major" if str(scale).lower().startswith("maj") else "Minor"
+        except Exception:
+            key_name, mode_name = "Unknown", ""
+
+        # Chords (HPCP + ChordsDetection)
+        frame_size = 4096
+        hop_size = 2048
+        w = es.Windowing(type="hann")
+        spec = es.Spectrum()
+        peaks = es.SpectralPeaks()
+        hpcp = es.HPCP()
+        chords_det = es.ChordsDetection()
+
+        chord_frames: list[tuple[float, str]] = []
+        t = 0.0
+        sr = 44100
+        for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+            s = spec(w(frame))
+            freqs, mags = peaks(s)
+            h = hpcp(freqs, mags)
+            chord, _strength = chords_det(h)
+            chord_frames.append((t, str(chord)))
+            t += hop_size / sr
+
+        # 1초 단위로 chord 대표값(최빈) 추출
+        max_sec = int(min(120, np.ceil(chord_frames[-1][0]) if chord_frames else 0))
+        timeline = []
+        for sec in range(0, max_sec + 1):
+            labels = [c for tt, c in chord_frames if sec <= tt < sec + 1]
+            if not labels:
+                continue
+            # 최빈값
+            chord = max(set(labels), key=labels.count)
+            timeline.append(
+                {"sec": sec, "time": format_mmss(sec), "chord": chord, "lyric": "", "section": ""}
+            )
+
+        if lyrics:
+            lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
+            if lines:
+                for i, row in enumerate(timeline):
+                    row["lyric"] = lines[i % len(lines)]
+
+        return {"tempo": tempo, "key": key_name, "mode": mode_name, "timeline": timeline}
+
+    # ---- librosa fallback ----
     if librosa is None:
-        raise RuntimeError("librosa가 설치되지 않았습니다.")
+        raise RuntimeError("Essentia/librosa가 모두 설치되지 않았습니다.")
 
     y, sr = librosa.load(audio_path, sr=22050, mono=True)
     if y.size == 0:
@@ -450,12 +525,7 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
             for i, row in enumerate(timeline):
                 row["lyric"] = lines[i % len(lines)]
 
-    return {
-        "tempo": float(tempo),
-        "key": key_name,
-        "mode": mode_name,
-        "timeline": timeline,
-    }
+    return {"tempo": float(tempo), "key": key_name, "mode": mode_name, "timeline": timeline}
 
 
 # ==========================================
@@ -718,6 +788,7 @@ def main():
                     "yt-dlp": "OK" if yt_dlp_available() else "NOT FOUND",
                     "ffmpeg": "OK" if ffmpeg_available() else "NOT FOUND",
                     "librosa": "OK" if librosa is not None else "NOT FOUND",
+                    "essentia": "OK" if essentia_available() else "NOT FOUND",
                     "chordino": "OK" if chordino_available() else "NOT FOUND",
                 }
             )
