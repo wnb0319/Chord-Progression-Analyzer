@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 import html
@@ -7,7 +9,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import base64
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import requests
 import streamlit as st
@@ -67,6 +69,16 @@ st.set_page_config(page_title="AI 타임라인 음악 분석기", layout="wide")
 # Streamlit Cloud가 아닌 환경(Cloud Run 등)에서는 secrets.toml이 없을 수 있습니다.
 # 그 경우 st.secrets 접근 시 바로 예외가 나므로, 안전하게 환경변수로 폴백합니다.
 def get_config_value(key: str, default: str = "") -> str:
+    # Streamlit은 secrets.toml이 없을 때 st.secrets 접근만으로도 경고를 여러 번 출력할 수 있어,
+    # 실제 파일이 있을 때만 st.secrets를 조회합니다.
+    secrets_paths = [
+        os.path.expanduser("~/.streamlit/secrets.toml"),
+        os.path.join(os.getcwd(), ".streamlit", "secrets.toml"),
+        "/app/.streamlit/secrets.toml",
+    ]
+    has_secrets_file = any(os.path.exists(p) for p in secrets_paths)
+    if not has_secrets_file:
+        return str(os.getenv(key, default))
     try:
         return str(st.secrets.get(key, os.getenv(key, default)))
     except StreamlitSecretNotFoundError:
@@ -96,7 +108,7 @@ def spotify_creds_status() -> dict:
     }
 
 
-def spotify_token_test() -> tuple[bool, str]:
+def spotify_token_test() -> Tuple[bool, str]:
     """현재 설정된 자격증명으로 토큰 발급이 되는지 서버에서 직접 확인."""
     stt = spotify_creds_status()
     if not (stt["client_id_set"] and stt["client_secret_set"]):
