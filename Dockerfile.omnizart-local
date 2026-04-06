@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     build-essential \
     git \
+    pkg-config \
+    libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -24,6 +26,8 @@ RUN pip install --upgrade pip setuptools wheel \
     && pip install -r /app/requirements.txt \
     # Omnizart의 madmom 빌드가 Cython을 요구하므로 선설치
     && pip install "Cython<3" \
+    # h5py 빌드가 pkgconfig 모듈을 요구하는 경우가 있어 선설치
+    && pip install pkgconfig \
     && pip install -r /app/requirements-local.txt --no-build-isolation
 
 COPY . /app
