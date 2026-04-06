@@ -77,6 +77,41 @@ SPOTIFY_CLIENT_SECRET = get_config_value(
 GENIUS_ACCESS_TOKEN = get_config_value("GENIUS_ACCESS_TOKEN", "YOUR_GENIUS_ACCESS_TOKEN")
 
 # ==========================================
+# ✅ Spotify 진단
+# ==========================================
+def spotify_creds_status() -> dict:
+    cid = SPOTIFY_CLIENT_ID or ""
+    csec = SPOTIFY_CLIENT_SECRET or ""
+    return {
+        "client_id_set": bool(cid) and not cid.startswith("YOUR_"),
+        "client_secret_set": bool(csec) and not csec.startswith("YOUR_"),
+        "client_id_len": len(cid),
+        "client_secret_len": len(csec),
+    }
+
+
+def spotify_token_test() -> tuple[bool, str]:
+    """현재 설정된 자격증명으로 토큰 발급이 되는지 서버에서 직접 확인."""
+    stt = spotify_creds_status()
+    if not (stt["client_id_set"] and stt["client_secret_set"]):
+        return False, "환경변수/Secrets에 SPOTIFY_CLIENT_ID/SECRET이 설정되지 않았습니다."
+    try:
+        sess = make_requests_session_no_proxy()
+        r = sess.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "client_credentials"},
+            auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code}: {r.text[:300]}"
+        js = r.json()
+        tok = js.get("access_token")
+        return (bool(tok), "토큰 발급 성공" if tok else f"응답 이상: {js}")
+    except Exception as e:
+        return False, f"요청 실패: {e}"
+
+# ==========================================
 # ✅ 공통 유틸
 # ==========================================
 PITCH_CLASSES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
@@ -940,6 +975,11 @@ def main():
                 "주의: Streamlit Community Cloud는 기본적으로 ffmpeg/Vamp(Chordino)가 없어서 "
                 "유튜브 오디오 추출/Chordino 분석이 실패할 수 있습니다. 이 경우 Cloud Run(Docker) 배포가 현실적인 해결책입니다."
             )
+        with st.expander("Spotify 자격증명 점검", expanded=False):
+            st.write(spotify_creds_status())
+            if st.button("Spotify 토큰 발급 테스트", use_container_width=True):
+                ok, msg = spotify_token_test()
+                (st.success if ok else st.error)(msg)
 
         st.markdown("### 🍪 YouTube 쿠키(선택)")
         with st.expander("로그인/봇체크 우회용 cookies.txt 업로드", expanded=False):
