@@ -54,6 +54,11 @@ try:
 except Exception:  # pragma: no cover
     es = None
 
+try:
+    from omnizart.chord.app import ChordTranscription  # type: ignore
+except Exception:  # pragma: no cover
+    ChordTranscription = None  # type: ignore
+
 # ==========================================
 # ⚙️ 0. 환경 설정 및 초기화 (API & Firebase)
 # ==========================================
@@ -221,6 +226,77 @@ def chordino_available() -> bool:
 
 def essentia_available() -> bool:
     return es is not None
+
+
+def omnizart_available() -> bool:
+    return ChordTranscription is not None
+
+
+def ensure_wav_for_omnizart(input_path: str) -> str:
+    """Omnizart chord transcribe는 wav 입력을 기대하므로 wav로 변환."""
+    if input_path.lower().endswith(".wav"):
+        return input_path
+    if not ffmpeg_available():
+        raise RuntimeError("Omnizart는 WAV 입력이 필요합니다. ffmpeg가 없어 변환할 수 없습니다.")
+    out_path = os.path.join(os.path.dirname(input_path), "omnizart_input.wav")
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", "44100", out_path]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"ffmpeg 변환 실패: {p.stderr[:300]}")
+    return out_path
+
+
+def analyze_with_omnizart(audio_path: str, lyrics: Optional[str]) -> Dict[str, Any]:
+    """Omnizart ChordTranscription으로 코드 타임라인 생성."""
+    if ChordTranscription is None:
+        raise RuntimeError("Omnizart가 설치되지 않았습니다. requirements-local.txt를 설치하세요.")
+
+    wav_path = ensure_wav_for_omnizart(audio_path)
+    out_dir = tempfile.mkdtemp(prefix="omnizart_out_")
+    try:
+        app = ChordTranscription()
+        _midi = app.transcribe(wav_path, output=out_dir)
+
+        # omnizart는 CSV로 chord 결과를 저장합니다. (파일명은 버전별로 다를 수 있어 탐색)
+        csv_path = None
+        for fn in os.listdir(out_dir):
+            if fn.lower().endswith(".csv"):
+                csv_path = os.path.join(out_dir, fn)
+                break
+        if not csv_path:
+            raise RuntimeError("Omnizart 결과 CSV를 찾지 못했습니다.")
+
+        timeline = []
+        with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.lower().startswith("chord"):
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                # 예상 포맷: chord,start,end  (문서 기준)
+                if len(parts) < 3:
+                    continue
+                chord = parts[0]
+                try:
+                    start = float(parts[1])
+                    end = float(parts[2])
+                except Exception:
+                    continue
+                sec = int(start)
+                timeline.append(
+                    {"sec": sec, "time": format_mmss(sec), "chord": chord, "lyric": "", "section": ""}
+                )
+
+        if lyrics:
+            lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
+            if lines:
+                for i, row in enumerate(timeline):
+                    row["lyric"] = lines[i % len(lines)]
+
+        # Omnizart chord 결과만으로는 BPM/Key를 직접 주지 않으므로 0/Unknown 유지
+        return {"tempo": 0.0, "key": "Unknown", "mode": "", "timeline": timeline}
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def download_youtube_audio_wav(youtube_url: str) -> str:
@@ -978,6 +1054,11 @@ def main():
                 "로컬 음원 파일 업로드 (권장: WAV, 가능: mp3/flac/m4a)",
                 type=["wav", "mp3", "flac", "m4a", "ogg", "aiff", "aif"],
             )
+            use_omnizart = st.checkbox(
+                "Omnizart로 코드 분석(설치된 경우)",
+                value=True,
+                help="Omnizart가 설치되어 있으면 Omnizart를 우선 사용합니다. 미설치/실패 시 Essentia/Librosa로 자동 폴백됩니다.",
+            )
             local_lyrics = st.text_area(
                 "가사(선택): 여기에 붙여넣기",
                 height=120,
@@ -987,16 +1068,22 @@ def main():
             if up is not None:
                 st.audio(up)
             if st.button("로컬 파일 분석", type="primary", use_container_width=True) and up is not None:
-                with st.spinner("Essentia로 분석 중..."):
+                with st.spinner("분석 중..."):
                     tmp_dir = tempfile.mkdtemp(prefix="local_audio_")
                     in_path = os.path.join(tmp_dir, up.name)
                     with open(in_path, "wb") as f:
                         f.write(up.read())
 
                     try:
-                        analysis = analyze_chords_and_timeline_from_audio(
-                            in_path, local_lyrics.strip() if local_lyrics.strip() else None
-                        )
+                        lyr = local_lyrics.strip() if local_lyrics.strip() else None
+                        analysis = None
+                        if use_omnizart and omnizart_available():
+                            try:
+                                analysis = analyze_with_omnizart(in_path, lyr)
+                            except Exception as e:
+                                st.warning(f"Omnizart 분석 실패 → Essentia/Librosa로 폴백합니다. ({e})")
+                        if analysis is None:
+                            analysis = analyze_chords_and_timeline_from_audio(in_path, lyr)
                     finally:
                         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1040,6 +1127,7 @@ def main():
                     "ffmpeg": "OK" if ffmpeg_available() else "NOT FOUND",
                     "librosa": "OK" if librosa is not None else "NOT FOUND",
                     "essentia": "OK" if essentia_available() else "NOT FOUND",
+                    "omnizart": "OK" if omnizart_available() else "NOT FOUND",
                     "chordino": "OK" if chordino_available() else "NOT FOUND",
                 }
             )

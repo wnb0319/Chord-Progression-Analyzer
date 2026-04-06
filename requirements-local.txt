@@ -1,0 +1,7 @@
+#
+# 로컬 분석(Omnizart)용 추가 의존성
+#
+# 주의: Omnizart는 설치가 무겁고(TensorFlow 등), Cloud Run/Streamlit Cloud 배포에 바로 넣으면
+# 빌드/런타임이 깨질 수 있어 requirements.txt와 분리합니다.
+#
+omnizart
