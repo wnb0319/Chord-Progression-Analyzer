@@ -26,6 +26,25 @@ git push -u origin main
 
 - GitHub Desktop에서 “Add Existing Repository” → Publish Repository
 
+#### 방법 C: SSH 키로 push (권장)
+
+이 PC에서 SSH 키를 새로 만들었다면, GitHub에 공개키를 등록해야 push가 됩니다.
+
+1. GitHub → Settings → SSH and GPG keys → New SSH key
+2. 아래 공개키를 그대로 등록
+
+```text
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIOxozHx1bLxXrQ00AudJuO3fDmtaL3CPWEP8iVO6BlD wnb0319@github
+```
+
+3. 그 다음 터미널에서 push
+
+```bash
+cd "/Users/jeon-wonho1/Desktop/Chord Progression Analyzer"
+git remote set-url origin git@github.com:wnb0319/Chord-Progression-Analyzer.git
+git push -u origin main
+```
+
 ### 2) Streamlit Cloud에서 배포
 
 1. Streamlit Community Cloud 접속 후 “New app”
