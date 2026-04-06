@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.parse
+import base64
 import numpy as np
 import requests
 import streamlit as st
@@ -100,14 +101,17 @@ def extract_youtube_title(url: str) -> str | None:
     if yt_dlp is None:
         return None
     try:
-        with yt_dlp.YoutubeDL(
-            {
-                "quiet": True,
-                "skip_download": True,
-                "noplaylist": True,
-                "extract_flat": True,
-            }
-        ) as ydl:
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": True,
+        }
+        cookiefile = get_yt_cookiefile()
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         title = (info or {}).get("title")
         return title.strip() if isinstance(title, str) and title.strip() else None
@@ -192,11 +196,19 @@ def download_youtube_audio_wav(youtube_url: str) -> str:
 
     tmp_dir = tempfile.mkdtemp(prefix="yt_audio_")
     outtmpl = os.path.join(tmp_dir, "audio.%(ext)s")
+    cookiefile = get_yt_cookiefile()
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
         "quiet": True,
         "noplaylist": True,
+        "cookiefile": cookiefile,
+        # 일부 환경에서 'bot check' 빈도를 낮추는 옵션들
+        "consoletitle": False,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        },
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -205,6 +217,9 @@ def download_youtube_audio_wav(youtube_url: str) -> str:
             }
         ],
     }
+    # cookiefile이 없으면 yt-dlp가 일부 영상에서 로그인 확인에 막힐 수 있음
+    if not cookiefile:
+        ydl_opts.pop("cookiefile", None)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
@@ -219,6 +234,34 @@ def download_youtube_audio_wav(youtube_url: str) -> str:
                 return os.path.join(tmp_dir, fn)
         raise RuntimeError("유튜브 오디오 WAV 파일을 찾지 못했습니다.")
     return wav_path
+
+
+def get_yt_cookiefile() -> str | None:
+    """yt-dlp에 전달할 cookies.txt 경로를 반환.
+
+    우선순위:
+    - 세션 업로드한 cookies.txt
+    - 환경변수 YTDLP_COOKIES_B64 (base64로 인코딩된 cookies.txt)
+    """
+    # 1) session upload
+    path = st.session_state.get("yt_cookiefile_path")
+    if isinstance(path, str) and path and os.path.exists(path):
+        return path
+
+    # 2) env var
+    b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if not b64:
+        return None
+    try:
+        data = base64.b64decode(b64.encode("utf-8"), validate=True)
+        tmp_dir = tempfile.mkdtemp(prefix="yt_cookies_")
+        p = os.path.join(tmp_dir, "cookies.txt")
+        with open(p, "wb") as f:
+            f.write(data)
+        st.session_state.yt_cookiefile_path = p
+        return p
+    except Exception:
+        return None
 
 # Firebase 초기화 (선택)
 db = None
@@ -807,6 +850,23 @@ def main():
                 "주의: Streamlit Community Cloud는 기본적으로 ffmpeg/Vamp(Chordino)가 없어서 "
                 "유튜브 오디오 추출/Chordino 분석이 실패할 수 있습니다. 이 경우 Cloud Run(Docker) 배포가 현실적인 해결책입니다."
             )
+
+        st.markdown("### 🍪 YouTube 쿠키(선택)")
+        with st.expander("로그인/봇체크 우회용 cookies.txt 업로드", expanded=False):
+            st.caption(
+                "일부 유튜브 영상은 봇체크 때문에 yt-dlp가 막힙니다. 그럴 때 브라우저에서 export한 cookies.txt를 업로드하면 해결되는 경우가 많습니다.\n"
+                "보안상 본계정 대신 서브 계정 사용을 권장합니다."
+            )
+            up = st.file_uploader("cookies.txt 업로드", type=["txt"])
+            if up is not None:
+                tmp_dir = tempfile.mkdtemp(prefix="yt_cookies_upload_")
+                p = os.path.join(tmp_dir, "cookies.txt")
+                with open(p, "wb") as f:
+                    f.write(up.read())
+                st.session_state.yt_cookiefile_path = p
+                st.success("cookies.txt 업로드 완료. 다시 분석을 눌러보세요.")
+            if st.session_state.get("yt_cookiefile_path"):
+                st.code(st.session_state.get("yt_cookiefile_path"), language="text")
 
         st.divider()
         st.markdown("### 💰 Sponsor")
