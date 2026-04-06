@@ -641,8 +641,13 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
             s = spec(w(frame))
             freqs, mags = peaks(s)
             h = hpcp(freqs, mags)
-            # essentia.array / numpy 형태 → python list로 변환
-            hpcp_frames.append(list(h))
+            # essentia/np scalar → python float로 강제 변환 (ChordsDetection 타입 파싱 이슈 방지)
+            vec = [float(x) for x in list(h)]
+            if len(vec) == 12:
+                hpcp_frames.append(vec)
+
+        if not hpcp_frames:
+            raise RuntimeError("HPCP 프레임을 생성하지 못했습니다. (오디오/포맷 문제 가능)")
 
         chords, strengths = chords_det(hpcp_frames)
         # 각 프레임의 시작 시각을 계산
