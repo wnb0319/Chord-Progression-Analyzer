@@ -5,3 +5,7 @@
 # 빌드/런타임이 깨질 수 있어 requirements.txt와 분리합니다.
 #
 omnizart
+#
+# Omnizart 의존성(madmom) 빌드에 필요
+#
+Cython<3

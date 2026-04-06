@@ -22,6 +22,8 @@ COPY requirements-local.txt /app/requirements-local.txt
 
 RUN pip install --upgrade pip setuptools wheel \
     && pip install -r /app/requirements.txt \
+    # Omnizart의 madmom 빌드가 Cython을 요구하므로 선설치
+    && pip install "Cython<3" \
     && pip install -r /app/requirements-local.txt --no-build-isolation
 
 COPY . /app
