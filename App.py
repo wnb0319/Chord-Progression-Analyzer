@@ -712,7 +712,16 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: Optional[str
             for i, row in enumerate(timeline):
                 row["lyric"] = lines[i % len(lines)]
 
-    return {"tempo": float(tempo), "key": key_name, "mode": mode_name, "timeline": timeline}
+    # librosa의 tempo는 버전에 따라 ndarray/스칼라로 올 수 있어 정규화합니다.
+    try:
+        tempo_val = float(getattr(tempo, "item", lambda: tempo)())
+    except Exception:
+        try:
+            tempo_val = float(tempo[0])  # type: ignore[index]
+        except Exception:
+            tempo_val = 0.0
+
+    return {"tempo": tempo_val, "key": key_name, "mode": mode_name, "timeline": timeline}
 
 
 # ==========================================
