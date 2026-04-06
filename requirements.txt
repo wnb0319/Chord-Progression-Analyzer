@@ -1,0 +1,7 @@
+streamlit
+numpy
+spotipy
+lyricsgenius
+yt-dlp
+librosa
+firebase-admin
