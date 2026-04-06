@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import base64
+from typing import Optional, Dict, Any
 import numpy as np
 import requests
 import streamlit as st
@@ -132,7 +133,7 @@ def is_youtube_url(s: str) -> bool:
     return any(host in s for host in ("youtube.com/watch", "youtu.be/"))
 
 
-def extract_youtube_title(url: str) -> str | None:
+def extract_youtube_title(url: str) -> Optional[str]:
     if yt_dlp is None:
         return None
     try:
@@ -154,7 +155,7 @@ def extract_youtube_title(url: str) -> str | None:
         return None
 
 
-def extract_youtube_id(url: str) -> str | None:
+def extract_youtube_id(url: str) -> Optional[str]:
     """youtube.com/watch?v=... 또는 youtu.be/... 에서 video id 추출."""
     try:
         u = urllib.parse.urlparse(url)
@@ -271,7 +272,7 @@ def download_youtube_audio_wav(youtube_url: str) -> str:
     return wav_path
 
 
-def get_yt_cookiefile() -> str | None:
+def get_yt_cookiefile() -> Optional[str]:
     """yt-dlp에 전달할 cookies.txt 경로를 반환.
 
     우선순위:
@@ -405,7 +406,7 @@ def spotify_audio_analysis(track_id: str):
         return None
 
 
-def build_timeline_from_spotify_analysis(analysis: dict, lyrics: str | None):
+def build_timeline_from_spotify_analysis(analysis: Dict[str, Any], lyrics: Optional[str]):
     """Spotify audio_analysis의 sections + segments → 코드 타임라인."""
     sections = analysis.get("sections") or []
     segments = analysis.get("segments") or []
@@ -593,7 +594,7 @@ def chord_from_chroma_vec(v: np.ndarray) -> str:
     return best_label if best_score >= 0.45 else "N"
 
 
-def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
+def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: Optional[str]):
     """오디오 기반 분석.
 
     우선순위:
