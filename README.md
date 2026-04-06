@@ -9,6 +9,18 @@ pip install -r requirements.txt
 streamlit run App.py
 ```
 
+## Omnizart(코드 인식) 로컬 실행 (macOS에서 권장: Docker)
+
+Omnizart는 의존성이 오래되어(macOS/Apple Silicon에서 `numba/llvmlite` 빌드가 자주 실패) **로컬 파이썬 venv 설치가 잘 안 되는 경우**가 많습니다.
+이럴 때는 로컬 머신 자원을 쓰면서도 의존성 충돌을 피하기 위해 **Docker로 로컬 실행**하는 게 가장 빠릅니다.
+
+```bash
+cd "/Users/jeon-wonho1/Desktop/Chord Progression Analyzer"
+./run_omnizart_local.sh
+```
+
+실행 후 브라우저에서 `http://localhost:8501` 접속 → `로컬 파일(업로드)` 탭에서 Omnizart 체크 후 분석하면 됩니다.
+
 ## API 키 설정 (선택)
 
 Streamlit의 `st.secrets` 또는 **환경변수**를 쓰도록 되어 있습니다.
