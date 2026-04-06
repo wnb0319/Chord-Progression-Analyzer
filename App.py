@@ -601,65 +601,68 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
     - librosa(간이): Essentia가 없을 때 폴백
     """
     if es is not None:
-        audio = es.MonoLoader(filename=audio_path, sampleRate=44100)()
+        try:
+            audio = es.MonoLoader(filename=audio_path, sampleRate=44100)()
+        except Exception:
+            audio = None
         if audio is None or len(audio) == 0:
-            raise RuntimeError("오디오를 불러오지 못했습니다.")
+            # Essentia 로더가 포맷을 못 읽는 경우 librosa로 폴백
+            audio = None
+        else:
+            # BPM
+            try:
+                bpm, _, _, _ = es.RhythmExtractor2013(method="multifeature")(audio)
+                tempo = float(bpm)
+            except Exception:
+                tempo = 0.0
 
-        # BPM
-        try:
-            bpm, _, _, _ = es.RhythmExtractor2013(method="multifeature")(audio)
-            tempo = float(bpm)
-        except Exception:
-            tempo = 0.0
+            # Key
+            try:
+                key, scale, _strength = es.KeyExtractor()(audio)
+                key_name = str(key)
+                mode_name = "Major" if str(scale).lower().startswith("maj") else "Minor"
+            except Exception:
+                key_name, mode_name = "Unknown", ""
 
-        # Key
-        try:
-            key, scale, _strength = es.KeyExtractor()(audio)
-            key_name = str(key)
-            mode_name = "Major" if str(scale).lower().startswith("maj") else "Minor"
-        except Exception:
-            key_name, mode_name = "Unknown", ""
+            # Chords (HPCP + ChordsDetection)
+            frame_size = 4096
+            hop_size = 2048
+            w = es.Windowing(type="hann")
+            spec = es.Spectrum()
+            peaks = es.SpectralPeaks()
+            hpcp = es.HPCP()
+            chords_det = es.ChordsDetection()
 
-        # Chords (HPCP + ChordsDetection)
-        frame_size = 4096
-        hop_size = 2048
-        w = es.Windowing(type="hann")
-        spec = es.Spectrum()
-        peaks = es.SpectralPeaks()
-        hpcp = es.HPCP()
-        chords_det = es.ChordsDetection()
+            chord_frames: list[tuple[float, str]] = []
+            t = 0.0
+            sr = 44100
+            for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+                s = spec(w(frame))
+                freqs, mags = peaks(s)
+                h = hpcp(freqs, mags)
+                chord, _strength = chords_det(h)
+                chord_frames.append((t, str(chord)))
+                t += hop_size / sr
 
-        chord_frames: list[tuple[float, str]] = []
-        t = 0.0
-        sr = 44100
-        for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
-            s = spec(w(frame))
-            freqs, mags = peaks(s)
-            h = hpcp(freqs, mags)
-            chord, _strength = chords_det(h)
-            chord_frames.append((t, str(chord)))
-            t += hop_size / sr
+            # 1초 단위로 chord 대표값(최빈) 추출
+            max_sec = int(min(120, np.ceil(chord_frames[-1][0]) if chord_frames else 0))
+            timeline = []
+            for sec in range(0, max_sec + 1):
+                labels = [c for tt, c in chord_frames if sec <= tt < sec + 1]
+                if not labels:
+                    continue
+                chord = max(set(labels), key=labels.count)
+                timeline.append(
+                    {"sec": sec, "time": format_mmss(sec), "chord": chord, "lyric": "", "section": ""}
+                )
 
-        # 1초 단위로 chord 대표값(최빈) 추출
-        max_sec = int(min(120, np.ceil(chord_frames[-1][0]) if chord_frames else 0))
-        timeline = []
-        for sec in range(0, max_sec + 1):
-            labels = [c for tt, c in chord_frames if sec <= tt < sec + 1]
-            if not labels:
-                continue
-            # 최빈값
-            chord = max(set(labels), key=labels.count)
-            timeline.append(
-                {"sec": sec, "time": format_mmss(sec), "chord": chord, "lyric": "", "section": ""}
-            )
+            if lyrics:
+                lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
+                if lines:
+                    for i, row in enumerate(timeline):
+                        row["lyric"] = lines[i % len(lines)]
 
-        if lyrics:
-            lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
-            if lines:
-                for i, row in enumerate(timeline):
-                    row["lyric"] = lines[i % len(lines)]
-
-        return {"tempo": tempo, "key": key_name, "mode": mode_name, "timeline": timeline}
+            return {"tempo": tempo, "key": key_name, "mode": mode_name, "timeline": timeline}
 
     # ---- librosa fallback ----
     if librosa is None:
@@ -763,9 +766,15 @@ def render_header(data):
     key = safe_text(data.get("key", ""))
     mode = safe_text(data.get("mode", ""))
 
+    art_html = (
+        f"<img src=\"{album_art}\" width=\"120\" style=\"border-radius: 15px;\">"
+        if album_art
+        else "<div style='width:120px; height:120px; border-radius:15px; background:#f0f2f6; display:flex; align-items:center; justify-content:center; color:#888;'>No Art</div>"
+    )
+
     html = f"""
     <div class="swiftui-card">
-        <img src="{album_art}" width="120" style="border-radius: 15px;">
+        {art_html}
         <div style="flex-grow: 1;">
             <h2 style="margin:0; color:#1f1f1f;">{title}</h2>
             <p style="margin:0; color:#888; font-size:18px;">{artist}</p>
@@ -818,11 +827,15 @@ def render_timeline(timeline):
         lyric = row.get("lyric") or ""
         section = row.get("section") or ""
 
+        has_seek = bool(st.session_state.get("yt_url"))
         c1, c2, c3 = st.columns([1, 1, 6], vertical_alignment="center")
         with c1:
-            if st.button(time_label, key=f"seek_{idx}_{sec}", use_container_width=True):
-                st.session_state.yt_start_sec = sec
-                st.rerun()
+            if has_seek:
+                if st.button(time_label, key=f"seek_{idx}_{sec}", use_container_width=True):
+                    st.session_state.yt_start_sec = sec
+                    st.rerun()
+            else:
+                st.markdown(f"<div class='time-badge'>{safe_text(time_label)}</div>", unsafe_allow_html=True)
         with c2:
             st.markdown(
                 f"<div class='chord-badge' style='width:100%; text-align:center;'>{safe_text(chord)}</div>",
@@ -846,101 +859,138 @@ def main():
 
     with main_col:
         st.title("🎶 AI 타임라인 음악 분석기")
-        search_query = st.text_input(
-            "유튜브 링크 또는 곡명/아티스트를 입력하세요",
-            placeholder="예: NewJeans Hype Boy",
-        )
-        manual_lyrics = st.text_area(
-            "가사(선택): Genius 토큰이 없으면 여기에 붙여넣기",
-            height=120,
-            placeholder="가사를 붙여넣으면 타임라인에 함께 표시됩니다.",
-        )
+        tab_online, tab_local = st.tabs(["유튜브/검색", "로컬 파일(업로드)"])
 
-        if st.button("분석 시작", type="primary") and search_query:
-            st.session_state.yt_url = search_query if is_youtube_url(search_query) else None
-            resolved_query = search_query
-            if is_youtube_url(search_query):
-                yt_title = extract_youtube_title(search_query)
-                if yt_title:
-                    resolved_query = yt_title
-                    st.caption(f"유튜브 제목으로 Spotify 검색: {yt_title}")
+        with tab_online:
+            search_query = st.text_input(
+                "유튜브 링크 또는 곡명/아티스트를 입력하세요",
+                placeholder="예: NewJeans Hype Boy",
+            )
+            manual_lyrics = st.text_area(
+                "가사(선택): Genius 토큰이 없으면 여기에 붙여넣기",
+                height=120,
+                placeholder="가사를 붙여넣으면 타임라인에 함께 표시됩니다.",
+            )
+
+            if st.button("분석 시작", type="primary") and search_query:
+                st.session_state.yt_url = (
+                    search_query if is_youtube_url(search_query) else None
+                )
+                resolved_query = search_query
+                if is_youtube_url(search_query):
+                    yt_title = extract_youtube_title(search_query)
+                    if yt_title:
+                        resolved_query = yt_title
+                        st.caption(f"유튜브 제목으로 Spotify 검색: {yt_title}")
+                    else:
+                        st.warning(
+                            "유튜브 제목 추출에 실패했습니다. 곡명/아티스트로 입력하면 더 정확합니다."
+                        )
+
+                try:
+                    track_data = get_spotify_data(resolved_query)
+                except Exception as e:
+                    st.error(str(e))
+                    return
+
+                st.session_state.current_track_id = track_data["id"]
+
+                cached_data = check_firestore_cache(track_data["id"])
+                if cached_data:
+                    st.success("✨ 캐시된 데이터를 불러옵니다. (분석 시간 단축!)")
+                    st.session_state.analyzed_data = cached_data
                 else:
-                    st.warning(
-                        "유튜브 제목 추출에 실패했습니다. 곡명/아티스트로 입력하면 더 정확합니다."
-                    )
+                    with st.spinner("AI 분석 진행 중..."):
+                        lyrics = (
+                            fetch_lyrics(track_data["artist"], track_data["title"])
+                            or (manual_lyrics.strip() if manual_lyrics.strip() else None)
+                        )
 
-            try:
-                track_data = get_spotify_data(resolved_query)
-            except Exception as e:
-                st.error(str(e))
-                return
-            st.session_state.current_track_id = track_data["id"]
+                        analysis = None
 
-            cached_data = check_firestore_cache(track_data["id"])
-            if cached_data:
-                st.success("✨ 캐시된 데이터를 불러옵니다. (분석 시간 단축!)")
-                st.session_state.analyzed_data = cached_data
-            else:
-                with st.spinner("AI 분석 진행 중..."):
-                    lyrics = (
-                        fetch_lyrics(track_data["artist"], track_data["title"])
-                        or (manual_lyrics.strip() if manual_lyrics.strip() else None)
-                    )
-
-                    analysis = None
-
-                    # 1순위) Spotify Audio Analysis API (다운로드 불필요, 가장 안정적)
-                    sp_analysis = spotify_audio_analysis(track_data["id"])
-                    if sp_analysis:
-                        analysis = build_timeline_from_spotify_analysis(sp_analysis, lyrics)
-                        if analysis:
-                            st.caption("Spotify Audio Analysis API로 분석 완료")
-
-                    # 2순위) 유튜브 오디오 → Essentia/librosa
-                    if analysis is None and st.session_state.get("yt_url"):
-                        try:
-                            wav_path = download_youtube_audio_wav(st.session_state["yt_url"])
-                            analysis = analyze_chords_and_timeline_from_audio(wav_path, lyrics)
+                        sp_analysis = spotify_audio_analysis(track_data["id"])
+                        if sp_analysis:
+                            analysis = build_timeline_from_spotify_analysis(sp_analysis, lyrics)
                             if analysis:
-                                st.caption("유튜브 오디오 + Essentia/librosa로 분석 완료")
-                        except Exception as e:
-                            st.warning(f"유튜브 오디오 분석 실패: {e}")
-                        finally:
-                            if "wav_path" in locals():
-                                try:
-                                    shutil.rmtree(os.path.dirname(wav_path), ignore_errors=True)
-                                except Exception:
-                                    pass
+                                st.caption("Spotify Audio Analysis API로 분석 완료")
 
-                    # 3순위) Spotify preview(30초)
-                    if analysis is None:
-                        tmp_path = f"preview_{track_data['id'] or 'track'}.mp3"
-                        try:
-                            _download_preview_mp3(track_data.get("preview_url", ""), tmp_path)
-                            analysis = analyze_chords_and_timeline_from_audio(tmp_path, lyrics)
-                            if analysis:
-                                st.caption("Spotify preview(30초)로 분석 완료")
-                        except Exception:
-                            pass
-                        finally:
-                            if os.path.exists(tmp_path):
-                                os.remove(tmp_path)
+                        if analysis is None and st.session_state.get("yt_url"):
+                            try:
+                                wav_path = download_youtube_audio_wav(
+                                    st.session_state["yt_url"]
+                                )
+                                analysis = analyze_chords_and_timeline_from_audio(
+                                    wav_path, lyrics
+                                )
+                                if analysis:
+                                    st.caption("유튜브 오디오 + Essentia/librosa로 분석 완료")
+                            except Exception as e:
+                                st.warning(f"유튜브 오디오 분석 실패: {e}")
+                            finally:
+                                if "wav_path" in locals():
+                                    try:
+                                        shutil.rmtree(
+                                            os.path.dirname(wav_path), ignore_errors=True
+                                        )
+                                    except Exception:
+                                        pass
 
-                    if analysis is None:
-                        st.error("분석에 실패했습니다. 곡명/아티스트로 다시 검색해보세요.")
-                        return
+                        if analysis is None:
+                            st.error("분석에 실패했습니다. 곡명/아티스트로 다시 검색해보세요.")
+                            return
 
-                    # 분석 결과로 BPM/Key 보정
-                    if float(track_data.get("bpm") or 0.0) <= 0:
-                        track_data["bpm"] = round(float(analysis.get("tempo") or 0), 2)
-                    if (track_data.get("key") or "Unknown") == "Unknown":
-                        track_data["key"] = analysis.get("key", "Unknown")
-                        track_data["mode"] = analysis.get("mode", "")
+                        if float(track_data.get("bpm") or 0.0) <= 0:
+                            track_data["bpm"] = round(float(analysis.get("tempo") or 0), 2)
+                        if (track_data.get("key") or "Unknown") == "Unknown":
+                            track_data["key"] = analysis.get("key", "Unknown")
+                            track_data["mode"] = analysis.get("mode", "")
 
-                    timeline_data = analysis["timeline"]
-                    final_data = {"meta": track_data, "timeline": timeline_data}
-                    save_to_firestore(track_data, timeline_data)
-                    st.session_state.analyzed_data = final_data
+                        timeline_data = analysis["timeline"]
+                        final_data = {"meta": track_data, "timeline": timeline_data}
+                        save_to_firestore(track_data, timeline_data)
+                        st.session_state.analyzed_data = final_data
+
+        with tab_local:
+            st.session_state.yt_url = None
+            up = st.file_uploader(
+                "로컬 음원 파일 업로드 (권장: WAV, 가능: mp3/flac/m4a)",
+                type=["wav", "mp3", "flac", "m4a", "ogg", "aiff", "aif"],
+            )
+            local_lyrics = st.text_area(
+                "가사(선택): 여기에 붙여넣기",
+                height=120,
+                placeholder="가사를 붙여넣으면 타임라인에 함께 표시됩니다.",
+                key="local_lyrics",
+            )
+            if up is not None:
+                st.audio(up)
+            if st.button("로컬 파일 분석", type="primary", use_container_width=True) and up is not None:
+                with st.spinner("Essentia로 분석 중..."):
+                    tmp_dir = tempfile.mkdtemp(prefix="local_audio_")
+                    in_path = os.path.join(tmp_dir, up.name)
+                    with open(in_path, "wb") as f:
+                        f.write(up.read())
+
+                    try:
+                        analysis = analyze_chords_and_timeline_from_audio(
+                            in_path, local_lyrics.strip() if local_lyrics.strip() else None
+                        )
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+                meta = {
+                    "id": f"local::{up.name}",
+                    "title": up.name,
+                    "artist": "Local File",
+                    "album_art": "",
+                    "bpm": round(float(analysis.get("tempo") or 0), 2),
+                    "key": analysis.get("key", "Unknown"),
+                    "mode": analysis.get("mode", ""),
+                }
+                st.session_state.analyzed_data = {
+                    "meta": meta,
+                    "timeline": analysis["timeline"],
+                }
 
         if st.session_state.analyzed_data:
             # 유튜브 플레이어(가능한 경우)
