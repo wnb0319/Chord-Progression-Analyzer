@@ -11,6 +11,11 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError
+except Exception:  # pragma: no cover
+    StreamlitSecretNotFoundError = Exception  # type: ignore
+
 # Optional deps (실제 연동 시 필요)
 try:
     import firebase_admin
@@ -52,17 +57,23 @@ except Exception:  # pragma: no cover
 # ==========================================
 st.set_page_config(page_title="AI 타임라인 음악 분석기", layout="wide")
 
+# Streamlit Cloud가 아닌 환경(Cloud Run 등)에서는 secrets.toml이 없을 수 있습니다.
+# 그 경우 st.secrets 접근 시 바로 예외가 나므로, 안전하게 환경변수로 폴백합니다.
+def get_config_value(key: str, default: str = "") -> str:
+    try:
+        return str(st.secrets.get(key, os.getenv(key, default)))
+    except StreamlitSecretNotFoundError:
+        return str(os.getenv(key, default))
+    except Exception:
+        return str(os.getenv(key, default))
+
+
 # API Keys (실제 환경에서는 st.secrets 또는 환경변수 사용 권장)
-SPOTIFY_CLIENT_ID = st.secrets.get(
-    "SPOTIFY_CLIENT_ID", os.getenv("SPOTIFY_CLIENT_ID", "YOUR_SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_ID = get_config_value("SPOTIFY_CLIENT_ID", "YOUR_SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = get_config_value(
+    "SPOTIFY_CLIENT_SECRET", "YOUR_SPOTIFY_CLIENT_SECRET"
 )
-SPOTIFY_CLIENT_SECRET = st.secrets.get(
-    "SPOTIFY_CLIENT_SECRET",
-    os.getenv("SPOTIFY_CLIENT_SECRET", "YOUR_SPOTIFY_CLIENT_SECRET"),
-)
-GENIUS_ACCESS_TOKEN = st.secrets.get(
-    "GENIUS_ACCESS_TOKEN", os.getenv("GENIUS_ACCESS_TOKEN", "YOUR_GENIUS_ACCESS_TOKEN")
-)
+GENIUS_ACCESS_TOKEN = get_config_value("GENIUS_ACCESS_TOKEN", "YOUR_GENIUS_ACCESS_TOKEN")
 
 # ==========================================
 # ✅ 공통 유틸
