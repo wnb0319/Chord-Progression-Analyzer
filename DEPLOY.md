@@ -31,6 +31,7 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 ### 2) 배포 (소스에서 바로 빌드/배포)
 
 ```bash
+cd "/Users/jeon-wonho1/Desktop/Chord Progression Analyzer"
 gcloud run deploy chord-analyzer \
   --source . \
   --region asia-northeast3 \
