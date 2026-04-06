@@ -1,6 +1,11 @@
 import os
 
 import html
+import re
+import shutil
+import subprocess
+import tempfile
+import urllib.parse
 import numpy as np
 import requests
 import streamlit as st
@@ -93,6 +98,108 @@ def extract_youtube_title(url: str) -> str | None:
         return title.strip() if isinstance(title, str) and title.strip() else None
     except Exception:
         return None
+
+
+def extract_youtube_id(url: str) -> str | None:
+    """youtube.com/watch?v=... 또는 youtu.be/... 에서 video id 추출."""
+    try:
+        u = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+
+    host = (u.netloc or "").lower()
+    path = u.path or ""
+    if "youtu.be" in host:
+        vid = path.strip("/").split("/")[0]
+        return vid or None
+    if "youtube.com" in host:
+        qs = urllib.parse.parse_qs(u.query or "")
+        vid = (qs.get("v") or [None])[0]
+        return vid or None
+    return None
+
+
+def render_youtube_player(video_id: str, start_sec: int = 0):
+    start_sec = max(int(start_sec or 0), 0)
+    src = f"https://www.youtube.com/embed/{video_id}?start={start_sec}&autoplay=1&mute=0&controls=1&rel=0"
+    components.html(
+        f"""
+        <div style="border-radius:16px; overflow:hidden; box-shadow: 0 12px 28px rgba(0,0,0,0.12);">
+          <iframe
+            width="100%"
+            height="420"
+            src="{src}"
+            title="YouTube player"
+            frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowfullscreen
+          ></iframe>
+        </div>
+        """,
+        height=440,
+    )
+
+
+def format_mmss(sec: int) -> str:
+    sec = max(int(sec), 0)
+    return f"{sec//60:02d}:{sec%60:02d}"
+
+
+def yt_dlp_available() -> bool:
+    return yt_dlp is not None
+
+
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def chordino_available() -> bool:
+    # Streamlit Cloud 환경에서는 보통 Vamp/Chordino가 없어서 False가 될 가능성이 큼.
+    try:
+        from chord_extractor.extractors import Chordino  # type: ignore
+
+        _ = Chordino
+        return True
+    except Exception:
+        return False
+
+
+def download_youtube_audio_wav(youtube_url: str) -> str:
+    """yt-dlp로 유튜브 오디오를 WAV로 추출해 로컬 파일 경로 반환."""
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp가 설치되지 않았습니다.")
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg가 없어 유튜브 오디오 변환이 불가합니다.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="yt_audio_")
+    outtmpl = os.path.join(tmp_dir, "audio.%(ext)s")
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "noplaylist": True,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "0",
+            }
+        ],
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+    except Exception as e:
+        raise RuntimeError(f"유튜브 오디오 추출 실패: {e}") from e
+
+    wav_path = os.path.join(tmp_dir, "audio.wav")
+    if not os.path.exists(wav_path):
+        # 확장자 이름이 달라졌을 가능성에 대비
+        for fn in os.listdir(tmp_dir):
+            if fn.lower().endswith(".wav"):
+                return os.path.join(tmp_dir, fn)
+        raise RuntimeError("유튜브 오디오 WAV 파일을 찾지 못했습니다.")
+    return wav_path
 
 # Firebase 초기화 (선택)
 db = None
@@ -333,8 +440,9 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
             continue
         v = chroma[:, mask].mean(axis=1)
         chord = chord_from_chroma_vec(v)
-        time_str = f"{sec//60:02d}:{sec%60:02d}"
-        timeline.append({"time": time_str, "chord": chord, "lyric": "", "section": ""})
+        timeline.append(
+            {"sec": sec, "time": format_mmss(sec), "chord": chord, "lyric": "", "section": ""}
+        )
 
     if lyrics:
         lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
@@ -435,7 +543,7 @@ def render_header(data):
 
 
 def render_timeline(timeline):
-    """타임라인 리스트 출력 및 HTML 애드센스 삽입."""
+    """타임라인 리스트 출력 (클릭 시 플레이어 구간 이동)."""
     st.subheader("⏱️ 타임라인 및 코드 분석")
 
     st.markdown(
@@ -462,23 +570,31 @@ def render_timeline(timeline):
                 "<div style='text-align:center; padding: 10px; background:#f9f9f9; border-radius:10px; margin: 10px 0;'>광고 슬롯 (AdSense)</div>",
                 unsafe_allow_html=True,
             )
-            # 실제 애드센스 코드 삽입 시 아래 사용 (반응형 CSS 적용)
-            # components.html("<style>.ad-container { width: 100%; height: auto; }</style><div class='ad-container'>광고 스크립트</div>", height=100)
 
-        section_html = (
-            f"<span class='section-tag'>{row['section']}</span>"
-            if row["section"] == "Chorus"
-            else ""
-        )
+        sec = int(row.get("sec") or 0)
+        time_label = row.get("time") or format_mmss(sec)
+        chord = row.get("chord") or "N"
+        lyric = row.get("lyric") or ""
+        section = row.get("section") or ""
 
-        row_html = f"""
-        <div class="timeline-row">
-            <div class="time-badge">{row['time']}</div>
-            <div class="chord-badge">{row['chord']}</div>
-            <div class="lyrics-text">{row['lyric']} {section_html}</div>
-        </div>
-        """
-        st.markdown(row_html, unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 1, 6], vertical_alignment="center")
+        with c1:
+            if st.button(time_label, key=f"seek_{idx}_{sec}", use_container_width=True):
+                st.session_state.yt_start_sec = sec
+                st.rerun()
+        with c2:
+            st.markdown(
+                f"<div class='chord-badge' style='width:100%; text-align:center;'>{safe_text(chord)}</div>",
+                unsafe_allow_html=True,
+            )
+        with c3:
+            section_html = (
+                f" <span class='section-tag'>{safe_text(section)}</span>" if section else ""
+            )
+            st.markdown(
+                f"<div class='lyrics-text'>{safe_text(lyric)}{section_html}</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # ==========================================
@@ -500,6 +616,7 @@ def main():
         )
 
         if st.button("분석 시작", type="primary") and search_query:
+            st.session_state.yt_url = search_query if is_youtube_url(search_query) else None
             resolved_query = search_query
             if is_youtube_url(search_query):
                 yt_title = extract_youtube_title(search_query)
@@ -529,15 +646,40 @@ def main():
                         or (manual_lyrics.strip() if manual_lyrics.strip() else None)
                     )
 
-                    # 유튜브 오디오를 직접 내려받으면(특히 Streamlit Cloud) 코덱/ffmpeg 제약이 잦아서,
-                    # Spotify preview(약 30초)를 내려받아 실제 오디오 기반 분석을 수행합니다.
-                    tmp_path = f"preview_{track_data['id'] or 'track'}.mp3"
-                    try:
-                        _download_preview_mp3(track_data.get("preview_url", ""), tmp_path)
-                        analysis = analyze_chords_and_timeline_from_audio(tmp_path, lyrics)
-                    finally:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
+                    analysis = None
+
+                    # 1) (가능하면) 유튜브에서 오디오를 뽑아서 분석(가장 “제대로”)
+                    if st.session_state.get("yt_url"):
+                        try:
+                            wav_path = download_youtube_audio_wav(st.session_state["yt_url"])
+                            analysis = analyze_chords_and_timeline_from_audio(wav_path, lyrics)
+                        except Exception as e:
+                            st.warning(f"유튜브 오디오 분석 실패 → Spotify preview로 폴백합니다. ({e})")
+                        finally:
+                            # temp 폴더째로 정리
+                            if "wav_path" in locals():
+                                try:
+                                    shutil.rmtree(os.path.dirname(wav_path), ignore_errors=True)
+                                except Exception:
+                                    pass
+
+                    # 2) 유튜브가 안 되면 Spotify preview(30초)로 폴백
+                    if analysis is None:
+                        tmp_path = f"preview_{track_data['id'] or 'track'}.mp3"
+                        try:
+                            _download_preview_mp3(track_data.get("preview_url", ""), tmp_path)
+                            analysis = analyze_chords_and_timeline_from_audio(tmp_path, lyrics)
+                        except Exception as e:
+                            # 캡처2 에러 방지: preview_url이 없으면 여기로 떨어짐
+                            st.error(
+                                "오디오 분석을 진행할 수 없습니다. (Spotify preview 미제공 + 유튜브 오디오 추출 불가)\n"
+                                f"- 원인: {e}\n"
+                                "- 해결: Streamlit Cloud에서는 ffmpeg가 없을 수 있어요. Cloud Run(Docker) 배포를 쓰면 해결됩니다."
+                            )
+                            return
+                        finally:
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
 
                     # Spotify Audio Features가 0/Unknown인 경우에만 오디오 기반 추정값으로 보정
                     if float(track_data.get("bpm") or 0.0) <= 0:
@@ -552,6 +694,14 @@ def main():
                     st.session_state.analyzed_data = final_data
 
         if st.session_state.analyzed_data:
+            # 유튜브 플레이어(가능한 경우)
+            yt_url = st.session_state.get("yt_url")
+            yt_id = extract_youtube_id(yt_url) if yt_url else None
+            if yt_id:
+                if "yt_start_sec" not in st.session_state:
+                    st.session_state.yt_start_sec = 0
+                render_youtube_player(yt_id, int(st.session_state.yt_start_sec or 0))
+
             render_header(st.session_state.analyzed_data["meta"])
             render_timeline(st.session_state.analyzed_data["timeline"])
 
@@ -559,6 +709,22 @@ def main():
         st.markdown("### 📌 최근 분석된 인기 곡")
         for track in get_recent_tracks():
             st.markdown(f"- {track}")
+
+        st.divider()
+        st.markdown("### 🧪 진단")
+        with st.expander("분석 환경 점검(yt-dlp/ffmpeg/chordino)", expanded=False):
+            st.write(
+                {
+                    "yt-dlp": "OK" if yt_dlp_available() else "NOT FOUND",
+                    "ffmpeg": "OK" if ffmpeg_available() else "NOT FOUND",
+                    "librosa": "OK" if librosa is not None else "NOT FOUND",
+                    "chordino": "OK" if chordino_available() else "NOT FOUND",
+                }
+            )
+            st.caption(
+                "주의: Streamlit Community Cloud는 기본적으로 ffmpeg/Vamp(Chordino)가 없어서 "
+                "유튜브 오디오 추출/Chordino 분석이 실패할 수 있습니다. 이 경우 Cloud Run(Docker) 배포가 현실적인 해결책입니다."
+            )
 
         st.divider()
         st.markdown("### 💰 Sponsor")
