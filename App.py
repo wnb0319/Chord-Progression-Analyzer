@@ -633,16 +633,23 @@ def analyze_chords_and_timeline_from_audio(audio_path: str, lyrics: str | None):
             hpcp = es.HPCP()
             chords_det = es.ChordsDetection()
 
-            chord_frames: list[tuple[float, str]] = []
-            t = 0.0
-            sr = 44100
-            for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
-                s = spec(w(frame))
-                freqs, mags = peaks(s)
-                h = hpcp(freqs, mags)
-                chord, _strength = chords_det(h)
-                chord_frames.append((t, str(chord)))
-                t += hop_size / sr
+        # ChordsDetection은 프레임별 단일 벡터가 아니라,
+        # HPCP 벡터들의 시퀀스(list[list[float]])를 입력으로 받습니다.
+        hpcp_frames: list[list[float]] = []
+        sr = 44100
+        for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+            s = spec(w(frame))
+            freqs, mags = peaks(s)
+            h = hpcp(freqs, mags)
+            # essentia.array / numpy 형태 → python list로 변환
+            hpcp_frames.append(list(h))
+
+        chords, strengths = chords_det(hpcp_frames)
+        # 각 프레임의 시작 시각을 계산
+        chord_frames: list[tuple[float, str]] = []
+        for i, chord in enumerate(chords):
+            t = (i * hop_size) / sr
+            chord_frames.append((t, str(chord)))
 
             # 1초 단위로 chord 대표값(최빈) 추출
             max_sec = int(min(120, np.ceil(chord_frames[-1][0]) if chord_frames else 0))
