@@ -283,39 +283,31 @@ if "current_track_id" not in st.session_state:
 # ==========================================
 # 🎵 1단계: 스포티파이 연동 및 메타데이터 추출
 # ==========================================
-def get_spotify_data(query: str):
-    """Spotify API를 통해 곡 메타데이터 및 Audio Features 추출
-
-    - query: "곡명 아티스트" 같은 텍스트 또는 스포티파이 트랙 URL/URI.
-    """
-
+def _spotify_client():
+    """재사용 가능한 Spotify 클라이언트 생성."""
     if spotipy is None or SpotifyClientCredentials is None:
-        raise RuntimeError(
-            "spotipy가 설치되지 않았습니다. requirements.txt 설치 후 다시 실행하세요."
-        )
-
+        raise RuntimeError("spotipy가 설치되지 않았습니다.")
     if (
         not SPOTIFY_CLIENT_ID
         or not SPOTIFY_CLIENT_SECRET
         or SPOTIFY_CLIENT_ID.startswith("YOUR_")
         or SPOTIFY_CLIENT_SECRET.startswith("YOUR_")
     ):
-        raise RuntimeError(
-            "Spotify API 키가 설정되지 않았습니다. .streamlit/secrets.toml을 확인하세요."
-        )
-
-    # 일부 환경(회사/학교/보안SW 등)에서는 HTTP(S)_PROXY 설정 때문에
-    # accounts.spotify.com 인증 요청이 프록시로 우회되며 403이 발생할 수 있습니다.
-    # requests가 환경 프록시를 자동 적용하지 않도록 차단합니다.
+        raise RuntimeError("Spotify API 키가 설정되지 않았습니다.")
     session = make_requests_session_no_proxy()
-
-    sp = spotipy.Spotify(
+    return spotipy.Spotify(
         auth_manager=SpotifyClientCredentials(
             client_id=SPOTIFY_CLIENT_ID,
             client_secret=SPOTIFY_CLIENT_SECRET,
         ),
         requests_session=session,
     )
+
+
+def get_spotify_data(query: str):
+    """Spotify API를 통해 곡 메타데이터 및 Audio Features 추출."""
+
+    sp = _spotify_client()
 
     track = None
     try:
@@ -360,6 +352,96 @@ def get_spotify_data(query: str):
         "key": key_name,
         "mode": mode_name,
         "preview_url": preview_url,
+        "duration_ms": track.get("duration_ms") or 0,
+    }
+
+
+def spotify_audio_analysis(track_id: str):
+    """Spotify Audio Analysis API — 구간별 피치/섹션/비트/세그먼트 전부 반환.
+
+    오디오 다운로드 없이 코드 타임라인을 만들 수 있는 핵심 데이터 소스.
+    """
+    if not track_id:
+        return None
+    try:
+        sp = _spotify_client()
+        return sp.audio_analysis(track_id)
+    except Exception:
+        return None
+
+
+def build_timeline_from_spotify_analysis(analysis: dict, lyrics: str | None):
+    """Spotify audio_analysis의 sections + segments → 코드 타임라인."""
+    sections = analysis.get("sections") or []
+    segments = analysis.get("segments") or []
+
+    if not segments:
+        return None
+
+    # 섹션 정보(Intro/Verse/Chorus 등은 Spotify가 직접 주진 않지만,
+    # 섹션별 key/mode/tempo를 줌 → 우리가 라벨링)
+    section_map: list[tuple[float, float, str, str]] = []
+    for i, sec in enumerate(sections):
+        start = float(sec.get("start") or 0)
+        dur = float(sec.get("duration") or 0)
+        k = int(sec.get("key") or -1)
+        m = int(sec.get("mode") or -1)
+        key_label = PITCH_CLASSES[k] if 0 <= k < 12 else ""
+        mode_label = "Major" if m == 1 else ("Minor" if m == 0 else "")
+        section_map.append((start, start + dur, key_label, mode_label))
+
+    # segments를 1초 단위로 bucket 분류 후 피치벡터 평균 → chord 추정
+    max_sec = int(min(segments[-1].get("start", 0) + segments[-1].get("duration", 0), 600))
+    buckets: dict[int, list[list[float]]] = {}
+    for seg in segments:
+        t = float(seg.get("start") or 0)
+        pitches = seg.get("pitches") or []
+        if len(pitches) != 12:
+            continue
+        sec_idx = int(t)
+        buckets.setdefault(sec_idx, []).append(pitches)
+
+    timeline = []
+    for sec in range(0, max_sec + 1):
+        if sec not in buckets:
+            continue
+        avg = np.mean(buckets[sec], axis=0)
+        chord = chord_from_chroma_vec(avg)
+
+        # 해당 초가 속한 섹션 찾기
+        section_label = ""
+        for s_start, s_end, s_key, s_mode in section_map:
+            if s_start <= sec < s_end:
+                section_label = f"{s_key} {s_mode}".strip()
+                break
+
+        timeline.append({
+            "sec": sec,
+            "time": format_mmss(sec),
+            "chord": chord,
+            "lyric": "",
+            "section": section_label,
+        })
+
+    if lyrics:
+        lines = [ln.strip() for ln in lyrics.split("\n") if ln.strip()]
+        if lines:
+            for i, row in enumerate(timeline):
+                row["lyric"] = lines[i % len(lines)]
+
+    # 전체 곡 템포/키(첫번째 섹션 기준)
+    track_info = analysis.get("track") or {}
+    tempo = float(track_info.get("tempo") or 0)
+    k = int(track_info.get("key") or -1)
+    m = int(track_info.get("mode") or -1)
+    key_name = PITCH_CLASSES[k] if 0 <= k < 12 else "Unknown"
+    mode_name = "Major" if m == 1 else ("Minor" if m == 0 else "")
+
+    return {
+        "tempo": tempo,
+        "key": key_name,
+        "mode": mode_name,
+        "timeline": timeline,
     }
 
 
@@ -764,7 +846,7 @@ def main():
                 st.success("✨ 캐시된 데이터를 불러옵니다. (분석 시간 단축!)")
                 st.session_state.analyzed_data = cached_data
             else:
-                with st.spinner("오디오 추출 및 AI 분석 진행 중..."):
+                with st.spinner("AI 분석 진행 중..."):
                     lyrics = (
                         fetch_lyrics(track_data["artist"], track_data["title"])
                         or (manual_lyrics.strip() if manual_lyrics.strip() else None)
@@ -772,45 +854,53 @@ def main():
 
                     analysis = None
 
-                    # 1) (가능하면) 유튜브에서 오디오를 뽑아서 분석(가장 “제대로”)
-                    if st.session_state.get("yt_url"):
+                    # 1순위) Spotify Audio Analysis API (다운로드 불필요, 가장 안정적)
+                    sp_analysis = spotify_audio_analysis(track_data["id"])
+                    if sp_analysis:
+                        analysis = build_timeline_from_spotify_analysis(sp_analysis, lyrics)
+                        if analysis:
+                            st.caption("Spotify Audio Analysis API로 분석 완료")
+
+                    # 2순위) 유튜브 오디오 → Essentia/librosa
+                    if analysis is None and st.session_state.get("yt_url"):
                         try:
                             wav_path = download_youtube_audio_wav(st.session_state["yt_url"])
                             analysis = analyze_chords_and_timeline_from_audio(wav_path, lyrics)
+                            if analysis:
+                                st.caption("유튜브 오디오 + Essentia/librosa로 분석 완료")
                         except Exception as e:
-                            st.warning(f"유튜브 오디오 분석 실패 → Spotify preview로 폴백합니다. ({e})")
+                            st.warning(f"유튜브 오디오 분석 실패: {e}")
                         finally:
-                            # temp 폴더째로 정리
                             if "wav_path" in locals():
                                 try:
                                     shutil.rmtree(os.path.dirname(wav_path), ignore_errors=True)
                                 except Exception:
                                     pass
 
-                    # 2) 유튜브가 안 되면 Spotify preview(30초)로 폴백
+                    # 3순위) Spotify preview(30초)
                     if analysis is None:
                         tmp_path = f"preview_{track_data['id'] or 'track'}.mp3"
                         try:
                             _download_preview_mp3(track_data.get("preview_url", ""), tmp_path)
                             analysis = analyze_chords_and_timeline_from_audio(tmp_path, lyrics)
-                        except Exception as e:
-                            # 캡처2 에러 방지: preview_url이 없으면 여기로 떨어짐
-                            st.error(
-                                "오디오 분석을 진행할 수 없습니다. (Spotify preview 미제공 + 유튜브 오디오 추출 불가)\n"
-                                f"- 원인: {e}\n"
-                                "- 해결: Streamlit Cloud에서는 ffmpeg가 없을 수 있어요. Cloud Run(Docker) 배포를 쓰면 해결됩니다."
-                            )
-                            return
+                            if analysis:
+                                st.caption("Spotify preview(30초)로 분석 완료")
+                        except Exception:
+                            pass
                         finally:
                             if os.path.exists(tmp_path):
                                 os.remove(tmp_path)
 
-                    # Spotify Audio Features가 0/Unknown인 경우에만 오디오 기반 추정값으로 보정
+                    if analysis is None:
+                        st.error("분석에 실패했습니다. 곡명/아티스트로 다시 검색해보세요.")
+                        return
+
+                    # 분석 결과로 BPM/Key 보정
                     if float(track_data.get("bpm") or 0.0) <= 0:
-                        track_data["bpm"] = round(float(analysis["tempo"]), 2)
+                        track_data["bpm"] = round(float(analysis.get("tempo") or 0), 2)
                     if (track_data.get("key") or "Unknown") == "Unknown":
-                        track_data["key"] = analysis["key"]
-                        track_data["mode"] = analysis["mode"]
+                        track_data["key"] = analysis.get("key", "Unknown")
+                        track_data["mode"] = analysis.get("mode", "")
 
                     timeline_data = analysis["timeline"]
                     final_data = {"meta": track_data, "timeline": timeline_data}
