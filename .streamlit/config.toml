@@ -2,5 +2,5 @@
 gatherUsageStats = false
 
 [server]
-prompt = false
+showEmailPrompt = false
 
